@@ -1,0 +1,67 @@
+name: Update NHL Lottery Odds
+
+on:
+  schedule:
+    # Runs daily at 6:00 AM UTC (2 AM ET / 11 PM PT)
+    - cron: "0 6 * * *"
+  workflow_dispatch: # Allow manual trigger from GitHub UI
+
+permissions:
+  contents: write
+
+jobs:
+  update-odds:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Generate odds JSON
+        run: python generate_odds.py
+
+      - name: Merge in manual notes
+        run: |
+          python3 - <<'EOF'
+          import json
+          from pathlib import Path
+
+          odds_path = Path("docs/odds.json")
+          notes_path = Path("notes.json")
+
+          odds = json.loads(odds_path.read_text())
+          notes = json.loads(notes_path.read_text())
+
+          # Index notes by teamId for fast lookup
+          notes_by_team = {}
+          for note in notes:
+              tid = note["teamId"]
+              notes_by_team.setdefault(tid, []).append({
+                  "text": note["text"],
+                  "type": note["type"]
+              })
+
+          # Attach notes to each team
+          for team in odds["teams"]:
+              team["notes"] = notes_by_team.get(team["id"], [])
+
+          odds_path.write_text(json.dumps(odds, indent=2))
+          print(f"Merged notes for teams: {list(notes_by_team.keys())}")
+          EOF
+
+      - name: Commit and push if changed
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add docs/odds.json
+          if git diff --staged --quiet; then
+            echo "No changes to odds.json — skipping commit"
+          else
+            git commit -m "chore: update lottery odds $(date -u +%Y-%m-%d)"
+            git push
+          fi
