@@ -1,0 +1,491 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>NHL Draft Lottery Simulator</title>
+<link href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@300;400;600;700;800;900&family=Barlow:wght@400;500&display=swap" rel="stylesheet">
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { background: #05050e; color: #e2e8f0; font-family: 'Barlow Condensed', sans-serif; min-height: 100vh; }
+  button { cursor: pointer; font-family: 'Barlow Condensed', sans-serif; }
+
+  @keyframes fadeIn   { from { opacity:0; transform:scale(0.93); } to { opacity:1; transform:scale(1); } }
+  @keyframes pulse    { 0%,100%{ opacity:1; } 50%{ opacity:0.35; } }
+  @keyframes spin     { to { transform: rotate(360deg); } }
+  @keyframes ballDrop { from { opacity:0; transform:translateY(-12px) scale(0.8); } to { opacity:1; transform:translateY(0) scale(1); } }
+
+  .winner-flash  { animation: fadeIn 0.35s ease; }
+  .drum-name     { animation: pulse 0.14s infinite; }
+  .loading-spin  { animation: spin 0.8s linear infinite; display:inline-block; }
+  .ball-drop     { animation: ballDrop 0.25s ease; }
+
+  /* Scrollbar */
+  ::-webkit-scrollbar { width: 4px; }
+  ::-webkit-scrollbar-track { background: #0a0a1a; }
+  ::-webkit-scrollbar-thumb { background: #1e293b; border-radius: 2px; }
+</style>
+</head>
+<body>
+<div id="root"></div>
+
+<script>
+// ─── CONFIG ──────────────────────────────────────────────────────────────────
+// IMPORTANT: Change this to your GitHub Pages URL before deploying
+// e.g. "https://stat-trick-hockey.github.io/nhl-lottery/odds.json"
+const ODDS_URL = "./odds.json";
+
+// Fallback odds (used if fetch fails — based on standard NHL formula)
+const FALLBACK_ODDS = [25.5,13.5,11.5,9.5,8.5,7.5,6.5,6.0,5.0,3.5,3.0,2.5,2.0,1.5,1.0,0.5];
+
+// ─── STATE ───────────────────────────────────────────────────────────────────
+const S = {
+  phase: 'loading',   // loading | idle | spinning | done | monte | error
+  teams: [],
+  year: null,
+  updatedAt: null,
+  picks: [],
+  currentPickIdx: 0,
+  drumTeam: null,
+  flashTeam: null,
+  activeBalls: [],
+  revealedBalls: [],
+  mcResults: null,
+  mcN: 10000,
+  errorMsg: null,
+};
+
+let timers = [];
+const later = (fn, ms) => { const t = setTimeout(fn, ms); timers.push(t); return t; };
+const clearTimers = () => { timers.forEach(clearTimeout); timers = []; };
+
+// ─── LOTTERY MATH ────────────────────────────────────────────────────────────
+function weightedPick(teams, exclude) {
+  const pool = teams.filter(t => !exclude.includes(t.id));
+  const total = pool.reduce((s, t) => s + t.odds, 0);
+  let r = Math.random() * total;
+  for (const t of pool) { r -= t.odds; if (r <= 0) return t; }
+  return pool[pool.length - 1];
+}
+
+function runOneLottery(teams) {
+  const picks = [], excluded = [];
+  for (let i = 0; i < 3; i++) {
+    const w = weightedPick(teams, excluded);
+    picks.push(w);
+    excluded.push(w.id);
+  }
+  return picks;
+}
+
+function runMonteCarlo(teams, n) {
+  const counts = {};
+  teams.forEach(t => counts[t.id] = { p1:0, p2:0, p3:0, top3:0 });
+  for (let i = 0; i < n; i++) {
+    runOneLottery(teams).forEach((team, idx) => {
+      counts[team.id][`p${idx+1}`]++;
+      counts[team.id].top3++;
+    });
+  }
+  return counts;
+}
+
+// ─── DATA FETCH ──────────────────────────────────────────────────────────────
+async function loadOdds() {
+  try {
+    const resp = await fetch(ODDS_URL + '?_=' + Date.now());
+    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+    const data = await resp.json();
+    S.teams = data.teams;
+    S.year = data.year;
+    S.updatedAt = data.updatedAt;
+    S.phase = 'idle';
+  } catch (e) {
+    console.warn('Could not load odds.json — using static fallback', e);
+    // Static fallback for local testing
+    S.teams = STATIC_FALLBACK_TEAMS;
+    S.year = 2026;
+    S.updatedAt = null;
+    S.phase = 'idle';
+  }
+  render();
+}
+
+// Static fallback for when odds.json isn't deployed yet
+const STATIC_FALLBACK_TEAMS = [
+  { id:"VAN", name:"Vancouver Canucks",     odds:25.5, color:"#00843D", bg:"#002B14", notes:[] },
+  { id:"CGY", name:"Calgary Flames",        odds:13.5, color:"#C8102E", bg:"#2E000A", notes:[] },
+  { id:"CHI", name:"Chicago Blackhawks",    odds:11.5, color:"#CC0000", bg:"#3B0000", notes:[] },
+  { id:"NYR", name:"NY Rangers",            odds:9.5,  color:"#0038A8", bg:"#001240", notes:[] },
+  { id:"STL", name:"St. Louis Blues",       odds:8.5,  color:"#002F87", bg:"#00103A", notes:[] },
+  { id:"WPG", name:"Winnipeg Jets",         odds:7.5,  color:"#041E42", bg:"#0A1520", notes:[] },
+  { id:"TOR", name:"Toronto Maple Leafs",   odds:6.5,  color:"#00205B", bg:"#00082A", notes:[] },
+  { id:"NJD", name:"New Jersey Devils",     odds:6.0,  color:"#CC0000", bg:"#300000", notes:[] },
+  { id:"NSH", name:"Nashville Predators",   odds:5.0,  color:"#FFB81C", bg:"#3A2B00", notes:[] },
+  { id:"LAK", name:"LA Kings",              odds:3.5,  color:"#A2AAAD", bg:"#1a1a1a", notes:[] },
+  { id:"FLA", name:"Florida Panthers",      odds:3.0,  color:"#C8102E", bg:"#2E000A", notes:[{text:"Pick goes to Chicago (Seth Jones trade, top-10 protected)", type:"trade"}] },
+  { id:"SEA", name:"Seattle Kraken",        odds:2.5,  color:"#96D8D8", bg:"#001B2E", notes:[] },
+  { id:"WSH", name:"Washington Capitals",   odds:2.0,  color:"#041E42", bg:"#0D1520", notes:[] },
+  { id:"PHI", name:"Philadelphia Flyers",   odds:1.5,  color:"#F74902", bg:"#3A1000", notes:[] },
+  { id:"OTT", name:"Ottawa Senators",       odds:1.0,  color:"#C2912C", bg:"#2E1F00", notes:[{text:"Pick forfeited — Dadonov trade penalty", type:"warning"}] },
+  { id:"CBJ", name:"Columbus Blue Jackets", odds:0.5,  color:"#002654", bg:"#00102A", notes:[] },
+];
+
+// ─── DOM HELPER ──────────────────────────────────────────────────────────────
+function el(tag, opts = {}) {
+  const e = document.createElement(tag);
+  if (opts.style)   e.style.cssText = opts.style;
+  if (opts.text)    e.textContent = opts.text;
+  if (opts.html)    e.innerHTML = opts.html;
+  if (opts.cls)     e.className = opts.cls;
+  if (opts.on)      Object.entries(opts.on).forEach(([ev,fn]) => e.addEventListener(ev, fn));
+  return e;
+}
+function div(style, children = []) {
+  const d = el('div', { style });
+  children.forEach(c => c && d.appendChild(c));
+  return d;
+}
+function txt(style, text) { return el('div', { style, text }); }
+
+// ─── RENDER ──────────────────────────────────────────────────────────────────
+function render() {
+  const root = document.getElementById('root');
+  root.innerHTML = '';
+
+  const wrap = div(`min-height:100vh;background:#05050e;background-image:radial-gradient(ellipse at 50% 0%,#0d1a3a 0%,#05050e 65%);display:flex;flex-direction:column;align-items:center;padding:28px 16px 48px;`);
+  root.appendChild(wrap);
+
+  // ── Header ──────────────────────────────────────────────────────────────────
+  const hdr = div(`text-align:center;margin-bottom:22px;`);
+  hdr.appendChild(txt(`font-size:10px;letter-spacing:6px;color:#4a6fa5;text-transform:uppercase;margin-bottom:4px;`, 'NHL · Draft Lottery'));
+  const h1 = el('div', { style:`font-size:44px;font-weight:900;letter-spacing:3px;text-transform:uppercase;background:linear-gradient(135deg,#fff 30%,#a0c4ff 100%);-webkit-background-clip:text;-webkit-text-fill-color:transparent;` });
+  h1.textContent = 'Lottery Simulator';
+  hdr.appendChild(h1);
+  if (S.updatedAt) {
+    const d = new Date(S.updatedAt);
+    const label = `Odds updated ${d.toLocaleDateString('en-US',{month:'short',day:'numeric',year:'numeric'})}`;
+    hdr.appendChild(txt(`font-size:10px;color:#334155;letter-spacing:2px;margin-top:4px;`, label));
+  }
+  wrap.appendChild(hdr);
+
+  // ── Loading ──────────────────────────────────────────────────────────────────
+  if (S.phase === 'loading') {
+    wrap.appendChild(div(`display:flex;flex-direction:column;align-items:center;gap:14px;margin-top:60px;`, [
+      el('div', { style:`width:32px;height:32px;border:3px solid #1e293b;border-top-color:#4a80ff;border-radius:50%;`, cls:'loading-spin' }),
+      txt(`font-size:13px;color:#475569;letter-spacing:3px;text-transform:uppercase;`, 'Loading Standings...'),
+    ]));
+    return;
+  }
+
+  // ── Year / Season label ───────────────────────────────────────────────────────
+  if (S.year) {
+    wrap.appendChild(txt(`font-size:12px;color:#475569;letter-spacing:3px;text-transform:uppercase;margin-bottom:20px;`, `${S.year} Draft Class · Gavin McKenna / Ivar Stenberg`));
+  }
+
+  // ── Stage ───────────────────────────────────────────────────────────────────
+  const stageStyle = `width:100%;max-width:820px;background:#0a0a1a;border:1px solid #1e2d4a;border-radius:8px;padding:28px 24px;margin-bottom:16px;position:relative;overflow:hidden;display:flex;flex-direction:column;align-items:center;justify-content:center;min-height:${S.phase==='monte'?'auto':'200px'};`;
+  const stage = div(stageStyle);
+
+  // bg glow
+  const glow = div(`position:absolute;top:0;left:50%;transform:translateX(-50%);width:500px;height:220px;background:radial-gradient(ellipse,#1a3a6a33 0%,transparent 70%);pointer-events:none;`);
+  stage.appendChild(glow);
+
+  if (S.phase === 'idle') {
+    stage.appendChild(txt(`font-size:17px;color:#2d3f55;letter-spacing:3px;text-transform:uppercase;`, 'Press START to draw the lottery'));
+  }
+
+  if (S.phase === 'spinning' || S.phase === 'done') {
+    // Balls row
+    const ballRow = div(`display:flex;gap:12px;margin-bottom:22px;`);
+    for (let b = 1; b <= 4; b++) {
+      const active   = S.activeBalls.includes(b);
+      const revealed = S.revealedBalls.includes(b);
+      const col = S.flashTeam?.color ?? '#60a5fa';
+      const ball = el('div', {
+        style: `width:50px;height:50px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:15px;font-weight:800;transition:all 0.3s;
+          background:${revealed ? `radial-gradient(circle at 35% 35%,${col}cc,${col}44)` : active ? 'radial-gradient(circle at 35% 35%,#fff4,#ffffff11)' : 'radial-gradient(circle at 35% 35%,#ffffff15,#ffffff06)'};
+          border:${revealed ? `2px solid ${col}` : active ? '2px solid #ffffff44' : '2px solid #ffffff12'};
+          color:${revealed ? '#fff' : active ? '#ffffffaa' : '#ffffff22'};
+          box-shadow:${revealed ? `0 0 28px ${col}99` : active ? '0 0 12px #ffffff22' : 'none'};`,
+        text: String(b),
+        cls: active && !revealed ? 'ball-drop' : '',
+      });
+      ballRow.appendChild(ball);
+    }
+    stage.appendChild(ballRow);
+
+    // Drum roll
+    if (S.drumTeam && !S.flashTeam) {
+      const dr = div(`text-align:center;min-height:70px;margin-bottom:8px;`);
+      dr.appendChild(txt(`font-size:11px;color:#475569;letter-spacing:4px;text-transform:uppercase;margin-bottom:8px;`, 'Could it be...'));
+      dr.appendChild(el('div', { style:`font-size:28px;font-weight:800;color:#94a3b8;letter-spacing:1px;`, text: S.drumTeam.name, cls:'drum-name' }));
+      stage.appendChild(dr);
+    }
+
+    // Winner flash
+    if (S.flashTeam) {
+      const wf = div(`text-align:center;margin-bottom:8px;`, [], 'winner-flash');
+      wf.className = 'winner-flash';
+      wf.appendChild(txt(`font-size:11px;letter-spacing:5px;color:${S.flashTeam.color};text-transform:uppercase;margin-bottom:8px;`, `★ Pick #${S.currentPickIdx+1} Goes To ★`));
+      const nameEl = el('div', { style:`font-size:38px;font-weight:900;color:#fff;letter-spacing:1px;text-shadow:0 0 50px ${S.flashTeam.color};` });
+      nameEl.textContent = S.flashTeam.name;
+      wf.appendChild(nameEl);
+      wf.appendChild(txt(`font-size:13px;color:${S.flashTeam.color};letter-spacing:2px;margin-top:6px;`, `${S.flashTeam.odds}% ODDS · Seed #${S.flashTeam.seed}`));
+      stage.appendChild(wf);
+    }
+
+    // Picks so far
+    if (S.picks.length > 0) {
+      const pickRow = div(`display:flex;gap:12px;justify-content:center;margin-top:14px;flex-wrap:wrap;`);
+      S.picks.forEach(({ pick, team }) => {
+        const card = div(`background:linear-gradient(135deg,${team.bg},#0a0a1a);border:1px solid ${team.color}55;border-radius:6px;padding:14px 22px;text-align:center;min-width:170px;box-shadow:0 0 24px ${team.color}22;`);
+        card.appendChild(txt(`font-size:10px;letter-spacing:4px;color:${team.color};text-transform:uppercase;margin-bottom:5px;`, `${['1ST','2ND','3RD'][pick-1]} Overall`));
+        card.appendChild(txt(`font-size:20px;font-weight:800;color:#fff;`, team.name));
+        card.appendChild(txt(`font-size:11px;color:#64748b;margin-top:4px;`, `${team.id} · ${team.odds}% odds`));
+        pickRow.appendChild(card);
+      });
+      stage.appendChild(pickRow);
+    }
+
+    if (S.phase === 'spinning' && !S.flashTeam && !S.drumTeam) {
+      stage.appendChild(txt(`font-size:12px;color:#334155;letter-spacing:3px;text-transform:uppercase;margin-top:12px;`, `Drawing pick #${S.currentPickIdx+1} of 3`));
+    }
+  }
+
+  // Monte Carlo results
+  if (S.phase === 'monte' && S.mcResults) {
+    renderMonte(stage);
+  }
+
+  wrap.appendChild(stage);
+
+  // ── Action Buttons ───────────────────────────────────────────────────────────
+  const btnRow = div(`display:flex;gap:10px;margin-bottom:26px;flex-wrap:wrap;justify-content:center;`);
+
+  const phases = { idle:'start', spinning:'spinning', done:'again', monte:'new' };
+  const btnCfg = {
+    start:    { label:'▶  Start Lottery',       bg:'linear-gradient(135deg,#1a2f6a,#2d52b8)', border:'#4a80ff88', glow:'#2d52b844', disabled:false },
+    spinning: { label:'Drawing...',              bg:'#151f2e',                                  border:'#1e293b',    glow:'none',       disabled:true  },
+    again:    { label:'↺  Run Again',            bg:'linear-gradient(135deg,#1a4a1a,#2d7a2d)', border:'#22c55e88', glow:'#22c55e33', disabled:false },
+    new:      { label:'↺  New Lottery',          bg:'linear-gradient(135deg,#1a2f6a,#2d52b8)', border:'#4a80ff88', glow:'#2d52b844', disabled:false },
+  };
+  const cfg = btnCfg[phases[S.phase]];
+  const mainBtn = el('button', {
+    style: `padding:14px 44px;font-size:15px;font-weight:800;letter-spacing:3px;text-transform:uppercase;background:${cfg.bg};color:${cfg.disabled?'#334155':'#fff'};border:2px solid ${cfg.border};border-radius:4px;box-shadow:0 0 30px ${cfg.glow};transition:all 0.2s;`,
+    text: cfg.label,
+  });
+  mainBtn.disabled = cfg.disabled;
+  mainBtn.addEventListener('click', () => {
+    if (S.phase === 'idle') startLottery();
+    else if (S.phase === 'done' || S.phase === 'monte') { resetSim(); render(); }
+  });
+  btnRow.appendChild(mainBtn);
+
+  if (!cfg.disabled) {
+    const mcBtn = el('button', {
+      style: `padding:14px 28px;font-size:15px;font-weight:800;letter-spacing:2px;text-transform:uppercase;background:linear-gradient(135deg,#2a1a4a,#5230a8);color:#fff;border:2px solid #7a50d888;border-radius:4px;box-shadow:0 0 30px #5230a833;transition:all 0.2s;`,
+      text: `⚡ Monte Carlo (${S.mcN.toLocaleString()})`,
+    });
+    mcBtn.addEventListener('click', () => {
+      clearTimers();
+      S.mcResults = runMonteCarlo(S.teams, S.mcN);
+      S.phase = 'monte';
+      render();
+    });
+    btnRow.appendChild(mcBtn);
+  }
+
+  wrap.appendChild(btnRow);
+
+  // ── Odds Table ───────────────────────────────────────────────────────────────
+  if (S.phase !== 'monte') renderOddsTable(wrap);
+}
+
+// ─── ODDS TABLE ──────────────────────────────────────────────────────────────
+function renderOddsTable(wrap) {
+  const section = div(`width:100%;max-width:820px;`);
+  section.appendChild(txt(`font-size:10px;letter-spacing:4px;color:#2d3f55;text-transform:uppercase;margin-bottom:12px;text-align:center;`, `${S.year || ''} Lottery Odds — No. 1 Pick`));
+  const grid = div(`display:grid;grid-template-columns:repeat(auto-fill,minmax(232px,1fr));gap:6px;`);
+
+  S.teams.forEach(t => {
+    const won = S.picks.find(p => p.team.id === t.id);
+    const eliminated = S.phase === 'done' && !won;
+    const hasNotes = t.notes && t.notes.length > 0;
+
+    const card = div(`background:${won?`linear-gradient(135deg,${t.bg},#0a0a1a)`:'#090910'};border:1px solid ${won?t.color+'66':'#161f30'};border-radius:4px;padding:8px 12px;display:flex;flex-direction:column;gap:6px;opacity:${eliminated?0.28:1};transition:all 0.3s;box-shadow:${won?`0 0 20px ${t.color}28`:'none'};`);
+
+    // Main row
+    const mainRow = div(`display:flex;align-items:center;gap:10px;`);
+    const dot = el('div', {
+      style: `width:30px;height:30px;border-radius:50%;background:radial-gradient(circle at 35% 35%,${t.color}99,${t.color}33);border:1px solid ${t.color}55;display:flex;align-items:center;justify-content:center;font-size:9px;font-weight:800;color:#fff;flex-shrink:0;`,
+      text: t.id,
+    });
+    mainRow.appendChild(dot);
+
+    const info = div(`flex:1;`);
+    info.appendChild(txt(`font-size:12px;font-weight:700;color:${won?'#fff':'#7a90a8'};`, t.name));
+    const barRow = div(`display:flex;align-items:center;gap:6px;margin-top:3px;`);
+    const barBg = div(`flex:1;height:3px;background:#111827;border-radius:2px;`);
+    const fill = div(`width:${(t.odds/S.teams[0].odds)*100}%;height:100%;background:${t.color};border-radius:2px;opacity:0.65;`);
+    barBg.appendChild(fill);
+    barRow.appendChild(barBg);
+    barRow.appendChild(txt(`font-size:10px;color:${won?t.color:'#3a5070'};font-weight:700;min-width:38px;`, `${t.odds}%`));
+    info.appendChild(barRow);
+    mainRow.appendChild(info);
+    if (won) mainRow.appendChild(txt(`font-size:12px;font-weight:800;color:${t.color};letter-spacing:1px;`, `#${won.pick}`));
+    card.appendChild(mainRow);
+
+    // Notes
+    if (hasNotes) {
+      t.notes.forEach(note => {
+        const noteColor = note.type === 'warning' ? '#f59e0b' : '#60a5fa';
+        const noteIcon  = note.type === 'warning' ? '⚠' : '↔';
+        const noteEl = txt(`font-size:10px;color:${noteColor};letter-spacing:0.3px;padding-left:4px;border-left:2px solid ${noteColor}55;line-height:1.4;`, `${noteIcon} ${note.text}`);
+        card.appendChild(noteEl);
+      });
+    }
+
+    // Record display
+    if (t.points !== undefined) {
+      card.appendChild(txt(`font-size:10px;color:#2d3f55;`, `${t.wins}-${t.losses}-${t.otLosses}  ·  ${t.points} pts  ·  ${t.gamesPlayed} GP`));
+    }
+
+    grid.appendChild(card);
+  });
+
+  section.appendChild(grid);
+  wrap.appendChild(section);
+}
+
+// ─── MONTE CARLO RESULTS ─────────────────────────────────────────────────────
+function renderMonte(stage) {
+  stage.style.alignItems = 'stretch';
+  stage.style.minHeight = 'auto';
+
+  const n = S.mcN;
+  const mc = S.mcResults;
+
+  const header = div(`text-align:center;margin-bottom:18px;`);
+  header.appendChild(txt(`font-size:14px;color:#64748b;letter-spacing:3px;text-transform:uppercase;margin-bottom:4px;`, `${n.toLocaleString()} Simulations`));
+  header.appendChild(txt(`font-size:11px;color:#2d3f55;letter-spacing:2px;`, 'Simulated probability of each team winning each lottery pick'));
+  stage.appendChild(header);
+
+  // Table
+  const tbl = div(`display:grid;grid-template-columns:1fr repeat(4,80px);gap:1px;font-size:12px;width:100%;`);
+
+  // Headers
+  ['TEAM', '#1 PICK', '#2 PICK', '#3 PICK', 'TOP 3'].forEach((h, i) => {
+    tbl.appendChild(txt(
+      `padding:7px 10px;background:#0d1220;color:#334155;letter-spacing:2px;font-weight:700;font-size:10px;text-align:${i===0?'left':'center'};border-bottom:1px solid #1e293b;`,
+      h
+    ));
+  });
+
+  S.teams.forEach(t => {
+    const r = mc[t.id];
+    const pcts = [r.p1, r.p2, r.p3, r.top3].map(v => ((v/n)*100).toFixed(1));
+
+    // Team name cell
+    const nameCell = div(`padding:7px 10px;background:#070710;display:flex;align-items:center;gap:8px;border-bottom:1px solid #0d1220;`);
+    nameCell.appendChild(div(`width:8px;height:8px;border-radius:50%;background:${t.color};flex-shrink:0;`));
+    nameCell.appendChild(txt(`color:#7a90a8;font-size:12px;`, t.name));
+    tbl.appendChild(nameCell);
+
+    pcts.forEach((pct, i) => {
+      const val = parseFloat(pct);
+      const isBold = i === 3; // top3 col
+      const color = val > 20 ? t.color : val > 8 ? '#94a3b8' : '#334155';
+      tbl.appendChild(txt(
+        `padding:7px 10px;background:#070710;text-align:center;color:${color};font-weight:${isBold||val>10?'800':'400'};font-size:${isBold?13:12}px;border-bottom:1px solid #0d1220;`,
+        `${pct}%`
+      ));
+    });
+  });
+
+  stage.appendChild(tbl);
+}
+
+// ─── LOTTERY ANIMATION ───────────────────────────────────────────────────────
+function resetSim() {
+  clearTimers();
+  S.phase = 'idle';
+  S.picks = [];
+  S.currentPickIdx = 0;
+  S.drumTeam = null;
+  S.flashTeam = null;
+  S.activeBalls = [];
+  S.revealedBalls = [];
+  S.mcResults = null;
+}
+
+function startLottery() {
+  S.phase = 'spinning';
+  runPick(0, []);
+}
+
+function runPick(pickIdx, prevPicks) {
+  const teams = S.teams;
+  const excluded = prevPicks.map(p => p.team.id);
+
+  S.currentPickIdx = pickIdx;
+  S.drumTeam = null;
+  S.flashTeam = null;
+  S.activeBalls = [];
+  S.revealedBalls = [];
+  render();
+
+  // Drop balls one by one
+  for (let b = 1; b <= 4; b++) {
+    later(() => { S.activeBalls.push(b); render(); }, b * 280);
+  }
+
+  // Drum roll flicker
+  let flicks = 0;
+  const flicker = () => {
+    if (S.phase !== 'spinning') return;
+    const pool = teams.filter(t => !excluded.includes(t.id));
+    S.drumTeam = pool[Math.floor(Math.random() * pool.length)];
+    render();
+    flicks++;
+    if (flicks < 28) later(flicker, 80 + flicks * 4);
+  };
+  later(flicker, 380);
+
+  // Pick winner after suspense
+  later(() => {
+    const winner = weightedPick(teams, excluded);
+    S.drumTeam = null;
+
+    // Reveal balls with winner color
+    for (let b = 1; b <= 4; b++) {
+      later(() => { S.revealedBalls.push(b); S.flashTeam = winner; render(); }, b * 160);
+    }
+
+    // Show winner card, advance
+    later(() => {
+      const newPicks = [...prevPicks, { pick: pickIdx + 1, team: winner }];
+      S.picks = newPicks;
+      S.flashTeam = winner;
+      render();
+
+      later(() => {
+        S.flashTeam = null;
+        if (pickIdx < 2) {
+          later(() => runPick(pickIdx + 1, newPicks), 700);
+        } else {
+          S.phase = 'done';
+          render();
+        }
+      }, 2200);
+    }, 4 * 160 + 300);
+
+  }, 2800);
+}
+
+// ─── BOOT ─────────────────────────────────────────────────────────────────────
+render(); // Show loading state immediately
+loadOdds();
+</script>
+</body>
+</html>
