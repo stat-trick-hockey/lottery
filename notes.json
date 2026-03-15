@@ -1,0 +1,22 @@
+[
+  {
+    "teamId": "OTT",
+    "text": "Pick forfeited — Dadonov trade penalty (voided trade to Anaheim)",
+    "type": "warning"
+  },
+  {
+    "teamId": "DET",
+    "text": "Pick goes to St. Louis Blues via trade",
+    "type": "trade"
+  },
+  {
+    "teamId": "FLA",
+    "text": "Pick goes to Chicago Blackhawks (Seth Jones trade, top-10 protected)",
+    "type": "trade"
+  },
+  {
+    "teamId": "MIN",
+    "text": "Pick goes to Vancouver Canucks (Quinn Hughes trade)",
+    "type": "trade"
+  }
+]
